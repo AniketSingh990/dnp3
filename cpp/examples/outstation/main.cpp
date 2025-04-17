@@ -1,43 +1,131 @@
-#include <openpal/logging/LogLevels.h>
 #include <asiodnp3/DNP3Manager.h>
-#include <asiodnp3/DefaultOutstationApplication.h>
-#include <asiodnp3/DefaultListenCallbacks.h>
-#include <opendnp3/outstation/DatabaseTemplates.h>
-#include <opendnp3/outstation/UpdateBuilder.h>
+#include <asiodnp3/PrintingSOEHandler.h>
+#include <asiodnp3/PrintingChannelListener.h>
+#include <asiodnp3/ConsoleLogger.h>
+#include <asiodnp3/UpdateBuilder.h>
+#include <asiopal/UTCTimeSource.h>
+#include <opendnp3/outstation/SimpleCommandHandler.h>
+#include <opendnp3/outstation/IUpdateHandler.h>
+#include <opendnp3/LogLevels.h>
 
 #include <iostream>
-#include <thread>
-#include <chrono>
+#include <string>
 
 using namespace std;
-using namespace openpal;
 using namespace opendnp3;
+using namespace openpal;
+using namespace asiopal;
 using namespace asiodnp3;
 
-int main()
+void ConfigureDatabase(DatabaseConfig& config)
 {
-    DNP3Manager manager(1);
-    auto logger = manager.GetLogger();
+    config.analog[0].clazz = PointClass::Class2;
+    config.analog[0].svariation = StaticAnalogVariation::Group30Var5;
+    config.analog[0].evariation = EventAnalogVariation::Group32Var7;
+}
 
-    auto channel = manager.AddTCPServer("server", levels::NORMAL, ChannelRetry::Default(), "0.0.0.0", 20000, nullptr);
+struct State
+{
+    uint32_t count = 0;
+    double value = 0.0;
+    bool binary = false;
+    DoubleBit dbit = DoubleBit::DETERMINED_OFF;
+};
 
-    OutstationStackConfig config;
+void AddUpdates(UpdateBuilder& builder, State& state, const std::string& input)
+{
+    cout << "\nBefore Updates:\n";
+    cout << "Counter: " << state.count << ", Analog: " << state.value
+         << ", Binary: " << (state.binary ? "True" : "False")
+         << ", DoubleBit: " << (state.dbit == DoubleBit::DETERMINED_ON ? "ON" : "OFF") << endl;
+
+    for (char c : input)
+    {
+        switch (c)
+        {
+        case 'c':
+            builder.Update(Counter(state.count), 0);
+            ++state.count;
+            break;
+        case 'a':
+            builder.Update(Analog(state.value), 0);
+            state.value += 1.0;
+            break;
+        case 'b':
+            builder.Update(Binary(state.binary), 0);
+            state.binary = !state.binary;
+            break;
+        case 'd':
+            builder.Update(DoubleBitBinary(state.dbit), 0);
+            state.dbit = (state.dbit == DoubleBit::DETERMINED_OFF) ? DoubleBit::DETERMINED_ON : DoubleBit::DETERMINED_OFF;
+            break;
+        default:
+            cerr << "Unknown input character: " << c << endl;
+            break;
+        }
+    }
+
+    cout << "After Updates:\n";
+    cout << "Counter: " << state.count << ", Analog: " << state.value
+         << ", Binary: " << (state.binary ? "True" : "False")
+         << ", DoubleBit: " << (state.dbit == DoubleBit::DETERMINED_ON ? "ON" : "OFF") << endl;
+}
+
+int main(int argc, char* argv[])
+{
+    const uint32_t FILTERS = levels::NORMAL | levels::ALL_COMMS;
+
+    DNP3Manager manager(1, ConsoleLogger::Create());
+
+    auto channel = manager.AddTCPServer(
+        "server",
+        FILTERS,
+        ChannelRetry::Default(),
+        "0.0.0.0",
+        20000,
+        PrintingChannelListener::Create()
+    );
+
+    OutstationStackConfig config(DatabaseSizes::AllTypes(10));
+
     config.outstation.eventBufferConfig = EventBufferConfig::AllTypes(10);
-    config.dbConfig.analog[0].clazz = PointClass::Class1;
+    config.outstation.params.allowUnsolicited = true;
 
-    auto outstation = channel->AddOutstation("outstation", [](DatabaseConfig& db) {
-        db.analog[0].clazz = PointClass::Class1;
-    }, DefaultOutstationApplication::Create(), config);
+    config.link.LocalAddr = 10;
+    config.link.RemoteAddr = 1;
+    config.link.KeepAliveTimeout = openpal::TimeDuration::Max();
+
+    ConfigureDatabase(config.dbConfig);
+
+    auto outstation = channel->AddOutstation(
+        "outstation",
+        SuccessCommandHandler::Create(),
+        DefaultOutstationApplication::Create(),
+        config
+    );
 
     outstation->Enable();
 
-    cout << "RTU running and serving voltage data on port 20000..." << endl;
+    State state;
+    std::string input;
 
     while (true)
     {
-        Analog voltage(230.0); // voltage in volts
-        outstation->Update(voltage, 0); // update index 0
-        this_thread::sleep_for(chrono::seconds(5));
+        cout << "\nEnter one or more measurement updates:\n";
+        cout << "c = counter, b = binary, d = doublebit, a = analog, 'quit' = exit\n> ";
+        cin >> input;
+
+        if (input == "quit") break;
+
+        UpdateBuilder builder;
+        AddUpdates(builder, state, input);
+
+        outstation->Apply(builder.Build());
+
+        cout << "Current State:\n";
+        cout << "Counter: " << state.count << ", Analog: " << state.value
+             << ", Binary: " << (state.binary ? "True" : "False")
+             << ", DoubleBit: " << (state.dbit == DoubleBit::DETERMINED_ON ? "ON" : "OFF") << endl;
     }
 
     return 0;
