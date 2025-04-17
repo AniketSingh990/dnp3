@@ -9,7 +9,7 @@
 #include <opendnp3/LogLevels.h>
 
 #include <iostream>
-##include <string>
+#include <string>
 
 using namespace std;
 using namespace opendnp3;
