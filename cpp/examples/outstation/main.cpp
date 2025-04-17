@@ -8,114 +8,134 @@
 #include <opendnp3/outstation/IUpdateHandler.h>
 #include <opendnp3/LogLevels.h>
 #include <boost/asio.hpp>
-#include <string>
-#include <thread>
 #include <iostream>
 #include <sstream>
-#include <vector>
-
+#include <thread>
+#include <string>
 using namespace std;
 using namespace opendnp3;
 using namespace openpal;
 using namespace asiopal;
 using namespace asiodnp3;
 using boost::asio::ip::tcp;
-
-shared_ptr<IOutstation> outstation_global;
-
+struct State {
+    uint32_t count = 0;
+    double value = 0;
+    bool binary = false;
+    DoubleBit dbit = DoubleBit::DETERMINED_OFF;
+};
 void ConfigureDatabase(DatabaseConfig& config)
 {
-    // Configure digital input points for binary data (0 or 1)
-    config.digital[0].clazz = PointClass::Class2;
-    config.digital[0].svariation = StaticBinaryVariation::Group1Var2;
-    config.digital[1] = config.digital[0]; // Another digital input, you can add more if needed
+    config.analog[0].clazz = PointClass::Class2;
+    config.analog[0].svariation = StaticAnalogVariation::Group30Var5;
+    config.analog[0].evariation = EventAnalogVariation::Group32Var7;
+    config.analog[1].clazz = PointClass::Class2;
+    config.analog[2].clazz = PointClass::Class2;
 }
-
-vector<string> split(const string& s, char delimiter)
+void AddUpdates(UpdateBuilder& builder, State& state, const std::string& arguments)
 {
-    vector<string> tokens;
-    string token;
-    istringstream tokenStream(s);
-    while (getline(tokenStream, token, delimiter))
+    for (const char& c : arguments)
     {
-        tokens.push_back(token);
+        switch (c)
+        {
+        case 'c':
+            builder.Update(Counter(state.count), 0);
+            ++state.count;
+            break;
+        case 'a':
+            builder.Update(Analog(state.value), 0);
+            state.value += 1;
+            break;
+        case 'b':
+            builder.Update(Binary(state.binary), 0);
+            state.binary = !state.binary;
+            break;
+        case 'd':
+            builder.Update(DoubleBitBinary(state.dbit), 0);
+            state.dbit = (state.dbit == DoubleBit::DETERMINED_OFF) ? DoubleBit::DETERMINED_ON : DoubleBit::DETERMINED_OFF;
+            break;
+        default:
+            break;
+        }
     }
-    return tokens;
 }
-
-void start_tcp_sensor_listener()
+void ReceiveSensorData(std::shared_ptr<IOutstation> outstation)
 {
-    try
-    {
+    try {
         boost::asio::io_context io_context;
-        // Listen on port 20001 for the binary data
-        tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 20001));
-        cout << "[INFO] Listening for binary sensor data on port 20001..." << endl;
+        tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 15000));
+        std::cout << "[INFO] Listening for sensor data on port 15000..." << std::endl;
         while (true)
         {
             tcp::socket socket(io_context);
             acceptor.accept(socket);
-            char data[1024] = {0};
-            size_t length = socket.read_some(boost::asio::buffer(data));
-            string received(data, length);
-            cout << "[RECEIVED] Binary data: " << received << endl;
-            
-            if (received == "0" || received == "1")
+            std::cout << "[INFO] Sensor connected." << std::endl;
+            char buffer[1024];
+            size_t length = socket.read_some(boost::asio::buffer(buffer));
+            buffer[length] = '\0';
+            std::string data(buffer);
+            std::cout << "[DATA RECEIVED] " << data << std::endl;
+            std::istringstream iss(data);
+            std::string tempStr, pressStr, humidStr;
+            if (std::getline(iss, tempStr, ',') &&
+                std::getline(iss, pressStr, ',') &&
+                std::getline(iss, humidStr, ','))
             {
+                float temperature = std::stof(tempStr);
+                float pressure = std::stof(pressStr);
+                float humidity = std::stof(humidStr);
                 UpdateBuilder builder;
-                builder.Update(Binary(received == "1"), 0); // Binary data (1 or 0)
-                outstation_global->Apply(builder.Build());
-                cout << "[UPDATED] Binary data updated in DNP3 outstation." << endl;
+                builder.Update(Analog(temperature), 0);
+                builder.Update(Analog(pressure), 1);
+                builder.Update(Analog(humidity), 2);
+                outstation->Apply(builder.Build());
+                std::cout << "[INFO] Sent to outstation: T=" << temperature
+                          << ", P=" << pressure << ", H=" << humidity << std::endl;
             }
             else
             {
-                cout << "[ERROR] Invalid binary data received." << endl;
+                std::cerr << "[ERROR] Invalid format: " << data << std::endl;
             }
             socket.close();
         }
     }
-    catch (exception& e)
+    catch (const std::exception& e)
     {
-        cerr << "[ERROR] TCP Server: " << e.what() << endl;
+        std::cerr << "[ERROR] Exception in ReceiveSensorData: " << e.what() << std::endl;
     }
 }
-
+void HandleUserInput(std::shared_ptr<IOutstation> outstation)
+{
+    string input;
+    State state;
+    while (true)
+    {
+        std::cout << "Enter one or more measurement changes then press <enter>" << std::endl;
+        std::cout << "c = counter, b = binary, d = doublebit, a = analog, 'quit' = exit" << std::endl;
+        std::cin >> input;
+        if (input == "quit") exit(0);
+        UpdateBuilder builder;
+        AddUpdates(builder, state, input);
+        outstation->Apply(builder.Build());
+    }
+}
 int main(int argc, char* argv[])
 {
     const uint32_t FILTERS = levels::NORMAL | levels::ALL_COMMS;
     DNP3Manager manager(1, ConsoleLogger::Create());
-
-    // DNP3 listening on port 20000
-    auto channel = manager.AddTCPServer(
-        "server",
-        FILTERS,
-        ChannelRetry::Default(),
-        "0.0.0.0",
-        20000,
-        PrintingChannelListener::Create()
-    );
-
+    auto channel = manager.AddTCPServer("server", FILTERS, ChannelRetry::Default(), "0.0.0.0", 20000, PrintingChannelListener::Create());
     OutstationStackConfig config(DatabaseSizes::AllTypes(10));
     config.outstation.eventBufferConfig = EventBufferConfig::AllTypes(10);
     config.outstation.params.allowUnsolicited = true;
     config.link.LocalAddr = 10;
     config.link.RemoteAddr = 1;
-    config.link.KeepAliveTimeout = TimeDuration::Max();
+    config.link.KeepAliveTimeout = openpal::TimeDuration::Max();
     ConfigureDatabase(config.dbConfig);
-
-    outstation_global = channel->AddOutstation(
-        "outstation",
-        SuccessCommandHandler::Create(),
-        DefaultOutstationApplication::Create(),
-        config
-    );
-
-    outstation_global->Enable();
-    cout << "[INFO] DNP3 Outstation started. Listening on 20000" << endl;
-
-    // Start TCP sensor server (on 20001)
-    thread tcp_thread(start_tcp_sensor_listener);
-    tcp_thread.join();
-
+    auto outstation = channel->AddOutstation("outstation", SuccessCommandHandler::Create(), DefaultOutstationApplication::Create(), config);
+    outstation->Enable();
+    std::thread sensorThread(ReceiveSensorData, outstation);
+    std::thread inputThread(HandleUserInput, outstation);
+    sensorThread.join();
+    inputThread.join();
     return 0;
 }
