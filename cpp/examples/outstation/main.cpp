@@ -26,11 +26,12 @@ struct State {
 };
 void ConfigureDatabase(DatabaseConfig& config)
 {
-    config.analog[0].clazz = PointClass::Class2;
+    config.analog[0].clazz = PointClass::Class1;
     config.analog[0].svariation = StaticAnalogVariation::Group30Var5;
     config.analog[0].evariation = EventAnalogVariation::Group32Var7;
-    config.analog[1].clazz = PointClass::Class2;
-    config.analog[2].clazz = PointClass::Class2;
+    config.analog[1].clazz = PointClass::Class1;
+    config.analog[2].clazz = PointClass::Class1;
+    config.binary[0].clazz = PointClass::Class1;
 }
 void AddUpdates(UpdateBuilder& builder, State& state, const std::string& arguments)
 {
@@ -76,21 +77,25 @@ void ReceiveSensorData(std::shared_ptr<IOutstation> outstation)
             std::string data(buffer);
             std::cout << "[DATA RECEIVED] " << data << std::endl;
             std::istringstream iss(data);
-            std::string tempStr, pressStr, humidStr;
+            std::string tempStr, pressStr, humidStr, binaryStr;
             if (std::getline(iss, tempStr, ',') &&
                 std::getline(iss, pressStr, ',') &&
-                std::getline(iss, humidStr, ','))
+                std::getline(iss, humidStr, ',') &&
+                std::getline(iss, binaryStr, ','))
             {
                 float temperature = std::stof(tempStr);
                 float pressure = std::stof(pressStr);
                 float humidity = std::stof(humidStr);
+                bool binaryValue = (binaryStr == "1");
                 UpdateBuilder builder;
                 builder.Update(Analog(temperature), 0);
                 builder.Update(Analog(pressure), 1);
                 builder.Update(Analog(humidity), 2);
+                builder.Update(Binary(binaryValue), 0);
                 outstation->Apply(builder.Build());
                 std::cout << "[INFO] Sent to outstation: T=" << temperature
-                          << ", P=" << pressure << ", H=" << humidity << std::endl;
+                          << ", P=" << pressure << ", H=" << humidity
+                          << ", Binary=" << binaryValue << std::endl;
             }
             else
             {
@@ -132,7 +137,7 @@ int main(int argc, char* argv[])
     config.link.KeepAliveTimeout = openpal::TimeDuration::Max();
     ConfigureDatabase(config.dbConfig);
     auto outstation = channel->AddOutstation("outstation", SuccessCommandHandler::Create(), DefaultOutstationApplication::Create(), config);
-    outstation->Enable();
+    outstation->Enable(); //
     std::thread sensorThread(ReceiveSensorData, outstation);
     std::thread inputThread(HandleUserInput, outstation);
     sensorThread.join();
