@@ -21,14 +21,14 @@ using namespace opendnp3;
 using namespace asiodnp3;
 void ConfigureDatabase(DatabaseConfig& config)
 {
-    // Analog points: Temperature (0), Pressure (1), Humidity (2)
-    for (int i = 0; i < 3; ++i)
+    // Device 101 → Analog 0,1,2 ; Device 102 → Analog 3,4,5
+    for (int i = 0; i < 6; ++i)
     {
         config.analog[i].clazz = PointClass::Class1;
         config.analog[i].svariation = StaticAnalogVariation::Group30Var1;
         config.analog[i].evariation = EventAnalogVariation::Group32Var1;
     }
-    // Binary point for status
+    // Binary input 0 (common to both)
     config.binary[0].clazz = PointClass::Class1;
 }
 void ReceiveSensorData(std::shared_ptr<IOutstation> outstation)
@@ -36,7 +36,7 @@ void ReceiveSensorData(std::shared_ptr<IOutstation> outstation)
     try {
         boost::asio::io_context io_context;
         tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 15000));
-        std::cout << "[INFO] Listening for sensor data on port 15000... (RTU2)" << std::endl;
+        std::cout << "[INFO] Listening for sensor data on port 15000..." << std::endl;
         while (true)
         {
             tcp::socket socket(io_context);
@@ -61,12 +61,27 @@ void ReceiveSensorData(std::shared_ptr<IOutstation> outstation)
                 float humidity = std::stof(humidStr);
                 bool binaryValue = (binaryStr == "1");
                 UpdateBuilder builder;
-                builder.Update(Analog(temperature), 0); // Index 0
-                builder.Update(Analog(pressure), 1);     // Index 1
-                builder.Update(Analog(humidity), 2);     // Index 2
-                builder.Update(Binary(binaryValue), 0);  // Binary index 0
+                // Assign analog index based on deviceId
+                if (deviceId == 101)
+                {
+                    builder.Update(Analog(temperature), 0);
+                    builder.Update(Analog(pressure), 1);
+                    builder.Update(Analog(humidity), 2);
+                }
+                else if (deviceId == 102)
+                {
+                    builder.Update(Analog(temperature), 3);
+                    builder.Update(Analog(pressure), 4);
+                    builder.Update(Analog(humidity), 5);
+                }
+                else
+                {
+                    std::cerr << "[WARNING] Unknown device ID: " << deviceId << std::endl;
+                    continue;
+                }
+                builder.Update(Binary(binaryValue), 0); // Binary input 0 shared
                 outstation->Apply(builder.Build());
-                std::cout << "[INFO] Applied to outstation: ID=" << deviceId
+                std::cout << "[INFO] Applied update: ID=" << deviceId
                           << ", T=" << temperature
                           << ", P=" << pressure
                           << ", H=" << humidity
@@ -88,9 +103,8 @@ int main(int argc, char* argv[])
 {
     const uint32_t FILTERS = levels::NORMAL | levels::ALL_COMMS;
     DNP3Manager manager(1, ConsoleLogger::Create());
-    // Channel listens on port 20000
     auto channel = manager.AddTCPServer(
-        "rtu2_server",
+        "rtu_server",
         FILTERS,
         ChannelRetry::Default(),
         "0.0.0.0",
@@ -99,9 +113,9 @@ int main(int argc, char* argv[])
     );
     OutstationStackConfig config(DatabaseSizes::AllTypes(10));
     config.outstation.eventBufferConfig = EventBufferConfig::AllTypes(10);
-    config.outstation.params.allowUnsolicited = true;  // Enable unsolicited responses
-    config.link.LocalAddr = 10;  // RTU2 address
-    config.link.RemoteAddr = 1;  // SCADA address
+    config.outstation.params.allowUnsolicited = true;
+    config.link.LocalAddr = 10;  // RTU address
+    config.link.RemoteAddr = 1;  // SCADA master
     config.link.KeepAliveTimeout = openpal::TimeDuration::Max();
     ConfigureDatabase(config.dbConfig);
     auto outstation = channel->AddOutstation(
@@ -111,7 +125,6 @@ int main(int argc, char* argv[])
         config
     );
     outstation->Enable();
-    // Start the sensor listener thread
     std::thread sensorThread(ReceiveSensorData, outstation);
     sensorThread.join();
     return 0;
